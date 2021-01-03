@@ -18,6 +18,13 @@ from CUB.config import BASE_DIR, N_CLASSES, N_ATTRIBUTES, UPWEIGHT_RATIO, MIN_LR
 from CUB.models import ModelXtoCY, ModelXtoChat_ChatToY, ModelXtoY, ModelXtoC, ModelOracleCtoY, ModelXtoCtoY
 
 
+def device(variable):
+    gpu = False
+    if gpu:
+        return variable.cuda()
+    return variable
+
+
 def run_epoch_simple(model, optimizer, loader, loss_meter, acc_meter, criterion, args, is_training):
     """
     A -> Y: Predicting class labels using only attributes with MLP
@@ -32,9 +39,9 @@ def run_epoch_simple(model, optimizer, loader, loss_meter, acc_meter, criterion,
             #inputs = [i.long() for i in inputs]
             inputs = torch.stack(inputs).t().float()
         inputs = torch.flatten(inputs, start_dim=1).float()
-        inputs_var = torch.autograd.Variable(inputs).cuda()
+        inputs_var = torch.autograd.Variable(inputs)
         inputs_var = inputs_var.cuda() if torch.cuda.is_available() else inputs_var
-        labels_var = torch.autograd.Variable(labels).cuda()
+        labels_var = torch.autograd.Variable(labels)
         labels_var = labels_var.cuda() if torch.cuda.is_available() else labels_var
         
         outputs = model(inputs_var)
@@ -62,7 +69,7 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
         if attr_criterion is None:
             inputs, labels = data
             attr_labels, attr_labels_var = None, None
-        else:
+        else:  #JM: this branch executes
             inputs, labels, attr_labels = data
             if args.n_attributes > 1:
                 attr_labels = [i.long() for i in attr_labels]
@@ -79,11 +86,14 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
         labels_var = torch.autograd.Variable(labels)
         labels_var = labels_var.cuda() if torch.cuda.is_available() else labels_var
 
-        if is_training and args.use_aux:
+        if is_training and args.use_aux:  #JM: True and True
             outputs, aux_outputs = model(inputs_var)
             losses = []
             out_start = 0
             if not args.bottleneck: #loss main is for the main task label (always the first output)
+                #JM This is where we must update to use the VAE loss
+                if args.use_vae:
+
                 loss_main = 1.0 * criterion(outputs[0], labels_var) + 0.4 * criterion(aux_outputs[0], labels_var)
                 losses.append(loss_main)
                 out_start = 1
@@ -111,9 +121,9 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
             acc = accuracy(outputs[0], labels, topk=(1,)) #only care about class prediction accuracy
             acc_meter.update(acc[0], inputs.size(0))
 
-        if attr_criterion is not None:
-            if args.bottleneck:
-                total_loss = sum(losses)/ args.n_attributes
+        if attr_criterion is not None: #JM: this is executed
+            if args.bottleneck: #JM: false
+                total_loss = sum(losses) / args.n_attributes
             else: #cotraining, loss by class prediction and loss by attribute prediction have the same weight
                 total_loss = losses[0] + sum(losses[1:])
                 if args.normalize_loss:
@@ -148,14 +158,16 @@ def train(model, args):
     logger.write(str(imbalance) + '\n')
     logger.flush()
 
-    model = model.cuda()
+    model = model.cuda() if torch.cuda.is_available() else model
     criterion = torch.nn.CrossEntropyLoss()
-    if args.use_attr and not args.no_img:
+    if args.use_attr and not args.no_img:  # JM: for joint: True and not False
         attr_criterion = [] #separate criterion (loss function) for each attribute
         if args.weighted_loss:
             assert(imbalance is not None)
             for ratio in imbalance:
-                attr_criterion.append(torch.nn.BCEWithLogitsLoss(weight=torch.FloatTensor([ratio]).cuda()))
+                rat = torch.FloatTensor([ratio])
+                attr_criterion.append(torch.nn.BCEWithLogitsLoss(
+                    weight=rat.cuda() if torch.cuda.is_available() else rat))
         else:
             for i in range(args.n_attributes):
                 attr_criterion.append(torch.nn.CrossEntropyLoss())
@@ -264,6 +276,7 @@ def train_X_to_C_to_y(args):
     model = ModelXtoCtoY(n_class_attr=args.n_class_attr, pretrained=args.pretrained, freeze=args.freeze,
                          num_classes=N_CLASSES, use_aux=args.use_aux, n_attributes=args.n_attributes,
                          expand_dim=args.expand_dim, use_relu=args.use_relu, use_sigmoid=args.use_sigmoid)
+    print('training', model.encoder.training)
     train(model, args)
 
 def train_X_to_y(args):
@@ -357,6 +370,8 @@ def parse_arguments(experiment):
                                  'For end2end & bottleneck model')
         parser.add_argument('-connect_CY', action='store_true',
                             help='Whether to use concepts as auxiliary features (in multitasking) to predict Y')
+        parser.add_argument('-use_vae', action='store_true',
+                            help='Use VAE loss and a convolutional decoder')
         args = parser.parse_args()
         args.three_class = (args.n_class_attr == 3)
         return (args,)
