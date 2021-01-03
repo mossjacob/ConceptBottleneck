@@ -56,6 +56,12 @@ def run_epoch_simple(model, optimizer, loader, loss_meter, acc_meter, criterion,
             optimizer.step() #optimizer step to update parameters
     return loss_meter, acc_meter
 
+def log_normal_pdf(sample, mean, logvar, rdim=1):
+    log2pi = torch.log(2. * np.pi)
+    return torch.sum(
+        -.5 * ((sample - mean) ** 2. * torch.exp(-logvar) + logvar + log2pi),
+        dim=rdim)
+
 def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_criterion, args, is_training):
     """
     For the rest of the networks (X -> A, cotraining, simple finetune)
@@ -87,16 +93,33 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
         labels_var = labels_var.cuda() if torch.cuda.is_available() else labels_var
 
         if is_training and args.use_aux:  #JM: True and True
-            outputs, aux_outputs = model(inputs_var)
             losses = []
             out_start = 0
-            if not args.bottleneck: #loss main is for the main task label (always the first output)
-                #JM This is where we must update to use the VAE loss
-                if args.use_vae:
 
-                loss_main = 1.0 * criterion(outputs[0], labels_var) + 0.4 * criterion(aux_outputs[0], labels_var)
-                losses.append(loss_main)
-                out_start = 1
+            if args.use_vae:
+                # JM This is where we must update to use the VAE loss
+                encoder_outputs, outputs, aux_outputs = model(inputs_var)
+                if args.use_vae:
+                    print('encoder output shape', encoder_outputs[0].shape)
+                    mean, logvar = torch.split(encoder_outputs[0], 2, dim=1)
+                    # Reparameterise, take single sample
+                    eps = torch.normal(torch.zeros(mean.shape), torch.ones(mean.shape))
+                    z = eps * torch.exp(logvar * .5) + mean
+                    decoder_outputs = model.decoder(z)
+                    print('decoder output shape', decoder_outputs.shape)
+                    nll = criterion(decoder_outputs, labels_var)
+                    logpx_z = -torch.sum(nll, dim=[1, 2, 3])
+                    logpz = log_normal_pdf(z, 0., 0.)
+                    logqz_x = log_normal_pdf(z, mean, logvar)
+                    loss_vae = -torch.mean(logpx_z + logpz - logqz_x)
+                    losses.append(loss_vae)
+                    out_start = 1
+            else:
+                outputs, aux_outputs = model(inputs_var)
+                if not args.bottleneck: #loss main is for the main task label (always the first output)
+                    loss_main = 1.0 * criterion(outputs[0], labels_var) + 0.4 * criterion(aux_outputs[0], labels_var)
+                    losses.append(loss_main)
+                    out_start = 1
             if attr_criterion is not None and args.attr_loss_weight > 0: #X -> A, cotraining, end2end
                 for i in range(len(attr_criterion)):
                     losses.append(args.attr_loss_weight * (1.0 * attr_criterion[i](outputs[i+out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i]) \

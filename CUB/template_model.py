@@ -52,11 +52,13 @@ class End2EndModel(torch.nn.Module):
 
 
 class VAE(nn.Module):
-    def __init__(self, encoder, decoder, attr_model):
+    def __init__(self, encoder, decoder, attr_model, use_relu=False, use_sigmoid=False):
         super(VAE, self).__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.attr_model = attr_model
+        self.use_relu = use_relu
+        self.use_sigmoid = use_sigmoid
 
     def forward_stage2(self, stage1_out):
         if self.use_relu:
@@ -76,6 +78,7 @@ class VAE(nn.Module):
     def forward(self, x):
         if self.encoder.training:
             outputs, aux_outputs = self.encoder(x)
+            # TODO: only send half the logits (the mu vectors) to the stage2
             return outputs, self.forward_stage2(outputs), self.forward_stage2(aux_outputs)
         else:
             outputs = self.first_model(x)
