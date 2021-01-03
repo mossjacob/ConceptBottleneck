@@ -3,3 +3,8 @@
 .ipynb_checkpoints/
 *pyc
 .idea/
+CUB_200_2011
+CUB_processed
+Joint0.01Model__Seed1
+ConceptModel__Seed1
+.DS_Store
