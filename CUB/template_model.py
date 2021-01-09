@@ -79,7 +79,7 @@ class VAE(nn.Module):
             aux_outputs = torch.cat(aux_outputs, dim=1)
 
             # only send half the logits (the mu vectors) to the stage2
-            outs = torch.stack(outputs, dim=1)  # TODO: check if there is a faster way of doing this
+            outs = F.elu(torch.stack(outputs, dim=1))  # TODO: check if there is a faster way of doing this
             mean = outs[:, :, 0]
             logvar = outs[:, :, 1]
             return (mean, logvar), self.forward_stage2(mean), self.forward_stage2(aux_outputs)

@@ -116,7 +116,7 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 nll = criterion(decoder_outputs,
                                 0.5 + 2 * inputs_var)  # JM: scaling because inputs_var seems to be [-0.25, 0.25]
                 # print(nll.shape)
-                logpx_z = -torch.sum(nll, dim=[1, 2, 3])
+                logpx_z = torch.sum(nll, dim=[1, 2, 3])
                 logpz = log_normal_pdf(z, torch.tensor(0.), torch.tensor(0.))
                 logqz_x = log_normal_pdf(z, mean, logvar)
                 # print('log p(z)=', logpz.shape, 'log q(z|x)=', logqz_x.shape, 'log p(x|z)=', logpx_z.shape)
