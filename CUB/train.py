@@ -104,18 +104,21 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 # JM This is where we must update to use the VAE loss
                 encoder_outputs, outputs, aux_outputs = model(inputs_var)
                 mean, logvar = encoder_outputs
-                print('Mean, logvar shapes: ', mean.shape, logvar.shape)
+                # print('Mean, logvar shapes: ', mean.shape, logvar.shape)
+
                 # Reparameterise, take single sample
                 eps = torch.normal(torch.zeros(mean.shape), torch.ones(mean.shape))
+                eps = eps.cuda() if torch.cuda.is_available() else eps
+                print(eps.device, logvar.device, mean.device)
                 z = eps * torch.exp(logvar * .5) + mean
                 decoder_outputs = model.decoder(z)
-                print('decoder output shape', decoder_outputs.shape, inputs_var.shape)
+                # print('decoder output shape', decoder_outputs.shape, inputs_var.shape)
                 nll = criterion(decoder_outputs, 0.5+2*inputs_var) # JM: scaling because inputs_var seems to be [-0.25, 0.25]
                 print(nll.shape)
                 logpx_z = -torch.sum(nll, dim=[1, 2, 3])
                 logpz = log_normal_pdf(z, torch.tensor(0.), torch.tensor(0.))
                 logqz_x = log_normal_pdf(z, mean, logvar)
-                print('log p(z)=', logpz.shape, 'log q(z|x)=', logqz_x.shape, 'log p(x|z)=', logpx_z.shape)
+                # print('log p(z)=', logpz.shape, 'log q(z|x)=', logqz_x.shape, 'log p(x|z)=', logpx_z.shape)
                 loss_vae = -torch.mean(logpx_z + logpz - logqz_x)
                 losses.append(loss_vae)
                 out_start = 1
