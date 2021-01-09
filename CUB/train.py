@@ -122,18 +122,27 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 loss_vae = -torch.mean(logpx_z + logpz - logqz_x)
                 losses.append(loss_vae)
                 out_start = 1
-            else:
+                if attr_criterion is not None and args.attr_loss_weight > 0:  # X -> A, cotraining, end2end
+                    print(len(attr_criterion), mean[:,1].shape,type(mean[:,1]), attr_labels_var.shape)
+                    for i in range(len(attr_criterion)):
+                        losses.append(
+                            args.attr_loss_weight * (attr_criterion[i](mean[:, i].squeeze().type(torch.cuda.FloatTensor),
+                                                                       attr_labels_var[:, i]))
+                        )
+                            #     + 0.4 * attr_criterion[i](
+                            # aux_outputs[i + out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i])))
+
+            else: #JM: TODO: re-add the main label loss
                 outputs, aux_outputs = model(inputs_var)
                 if not args.bottleneck:  # loss main is for the main task label (always the first output)
                     loss_main = 1.0 * criterion(outputs[0], labels_var) + 0.4 * criterion(aux_outputs[0], labels_var)
                     losses.append(loss_main)
                     out_start = 1
-            if attr_criterion is not None and args.attr_loss_weight > 0:  # X -> A, cotraining, end2end
+            if not args.use_vae and attr_criterion is not None and args.attr_loss_weight > 0:  # X -> A, cotraining, end2end
                 for i in range(len(attr_criterion)):
                     losses.append(args.attr_loss_weight * (
                             1.0 * attr_criterion[i](outputs[i + out_start].squeeze().type(torch.cuda.FloatTensor),
-                                                    attr_labels_var[:, i]) \
-                            + 0.4 * attr_criterion[i](
+                                                    attr_labels_var[:, i]) + 0.4 * attr_criterion[i](
                         aux_outputs[i + out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i])))
         else:  # testing or no aux logits
             outputs = model(inputs_var)
