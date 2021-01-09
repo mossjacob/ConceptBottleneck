@@ -109,12 +109,13 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 # Reparameterise, take single sample
                 eps = torch.normal(torch.zeros(mean.shape), torch.ones(mean.shape))
                 eps = eps.cuda() if torch.cuda.is_available() else eps
-                print(eps.device, logvar.device, mean.device)
+                # print(eps.device, logvar.device, mean.device)
                 z = eps * torch.exp(logvar * .5) + mean
                 decoder_outputs = model.decoder(z)
                 # print('decoder output shape', decoder_outputs.shape, inputs_var.shape)
-                nll = criterion(decoder_outputs, 0.5+2*inputs_var) # JM: scaling because inputs_var seems to be [-0.25, 0.25]
-                print(nll.shape)
+                nll = criterion(decoder_outputs,
+                                0.5 + 2 * inputs_var)  # JM: scaling because inputs_var seems to be [-0.25, 0.25]
+                # print(nll.shape)
                 logpx_z = -torch.sum(nll, dim=[1, 2, 3])
                 logpz = log_normal_pdf(z, torch.tensor(0.), torch.tensor(0.))
                 logqz_x = log_normal_pdf(z, mean, logvar)
@@ -123,7 +124,7 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 losses.append(loss_vae)
                 out_start = 1
                 if attr_criterion is not None and args.attr_loss_weight > 0:  # X -> A, cotraining, end2end
-                    print(len(attr_criterion), mean[:,1].shape,type(mean[:,1]), attr_labels_var.shape)
+                    # print(len(attr_criterion), mean[:,1].shape,type(mean[:,1]), attr_labels_var.shape)
                     for i in range(len(attr_criterion)):
                         losses.append(
                             args.attr_loss_weight * (attr_criterion[i](mean[:, i].squeeze().type(torch.cuda.FloatTensor),
@@ -170,6 +171,7 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 total_loss = sum(losses) / args.n_attributes
             else:  # cotraining, loss by class prediction and loss by attribute prediction have the same weight
                 total_loss = losses[0] + sum(losses[1:])
+                print('cotraining, loss', total_loss)
                 if args.normalize_loss:
                     total_loss = total_loss / (1 + args.attr_loss_weight * args.n_attributes)
         else:  # finetune
