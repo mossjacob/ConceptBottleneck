@@ -5,6 +5,7 @@ import pdb
 import os
 import sys
 import argparse
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import math
@@ -16,6 +17,8 @@ from CUB import probe, tti, gen_cub_synthetic, hyperopt
 from CUB.dataset import load_data, find_class_imbalance
 from CUB.config import BASE_DIR, N_CLASSES, N_ATTRIBUTES, UPWEIGHT_RATIO, MIN_LR, LR_DECAY_SIZE
 from CUB.models import ModelXtoCY, ModelXtoChat_ChatToY, ModelXtoY, ModelXtoC, ModelOracleCtoY, ModelXtoCtoY
+
+log2pi = torch.log(torch.tensor(2. * np.pi))
 
 
 def device(variable):
@@ -36,14 +39,14 @@ def run_epoch_simple(model, optimizer, loader, loss_meter, acc_meter, criterion,
     for _, data in enumerate(loader):
         inputs, labels = data
         if isinstance(inputs, list):
-            #inputs = [i.long() for i in inputs]
+            # inputs = [i.long() for i in inputs]
             inputs = torch.stack(inputs).t().float()
         inputs = torch.flatten(inputs, start_dim=1).float()
         inputs_var = torch.autograd.Variable(inputs)
         inputs_var = inputs_var.cuda() if torch.cuda.is_available() else inputs_var
         labels_var = torch.autograd.Variable(labels)
         labels_var = labels_var.cuda() if torch.cuda.is_available() else labels_var
-        
+
         outputs = model(inputs_var)
         loss = criterion(outputs, labels_var)
         acc = accuracy(outputs, labels, topk=(1,))
@@ -51,16 +54,17 @@ def run_epoch_simple(model, optimizer, loader, loss_meter, acc_meter, criterion,
         acc_meter.update(acc[0], inputs.size(0))
 
         if is_training:
-            optimizer.zero_grad() #zero the parameter gradients
+            optimizer.zero_grad()  # zero the parameter gradients
             loss.backward()
-            optimizer.step() #optimizer step to update parameters
+            optimizer.step()  # optimizer step to update parameters
     return loss_meter, acc_meter
 
+
 def log_normal_pdf(sample, mean, logvar, rdim=1):
-    log2pi = torch.log(2. * np.pi)
     return torch.sum(
         -.5 * ((sample - mean) ** 2. * torch.exp(-logvar) + logvar + log2pi),
         dim=rdim)
+
 
 def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_criterion, args, is_training):
     """
@@ -75,11 +79,11 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
         if attr_criterion is None:
             inputs, labels = data
             attr_labels, attr_labels_var = None, None
-        else:  #JM: this branch executes
+        else:  # JM: this branch executes
             inputs, labels, attr_labels = data
             if args.n_attributes > 1:
                 attr_labels = [i.long() for i in attr_labels]
-                attr_labels = torch.stack(attr_labels).t()#.float() #N x 312
+                attr_labels = torch.stack(attr_labels).t()  # .float() #N x 312
             else:
                 if isinstance(attr_labels, list):
                     attr_labels = attr_labels[0]
@@ -92,39 +96,43 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
         labels_var = torch.autograd.Variable(labels)
         labels_var = labels_var.cuda() if torch.cuda.is_available() else labels_var
 
-        if is_training and args.use_aux:  #JM: True and True
+        if is_training and args.use_aux:  # JM: True and True
             losses = []
             out_start = 0
 
             if args.use_vae:
                 # JM This is where we must update to use the VAE loss
                 encoder_outputs, outputs, aux_outputs = model(inputs_var)
-                if args.use_vae:
-                    print('encoder output shape', encoder_outputs[0].shape)
-                    mean, logvar = torch.split(encoder_outputs[0], 2, dim=1)
-                    # Reparameterise, take single sample
-                    eps = torch.normal(torch.zeros(mean.shape), torch.ones(mean.shape))
-                    z = eps * torch.exp(logvar * .5) + mean
-                    decoder_outputs = model.decoder(z)
-                    print('decoder output shape', decoder_outputs.shape)
-                    nll = criterion(decoder_outputs, labels_var)
-                    logpx_z = -torch.sum(nll, dim=[1, 2, 3])
-                    logpz = log_normal_pdf(z, 0., 0.)
-                    logqz_x = log_normal_pdf(z, mean, logvar)
-                    loss_vae = -torch.mean(logpx_z + logpz - logqz_x)
-                    losses.append(loss_vae)
-                    out_start = 1
+                mean, logvar = encoder_outputs
+                print('Mean, logvar shapes: ', mean.shape, logvar.shape)
+                # Reparameterise, take single sample
+                eps = torch.normal(torch.zeros(mean.shape), torch.ones(mean.shape))
+                z = eps * torch.exp(logvar * .5) + mean
+                decoder_outputs = model.decoder(z)
+                print('decoder output shape', decoder_outputs.shape, inputs_var.shape)
+                nll = criterion(decoder_outputs, 0.5+2*inputs_var) # JM: scaling because inputs_var seems to be [-0.25, 0.25]
+                print(nll.shape)
+                logpx_z = -torch.sum(nll, dim=[1, 2, 3])
+                logpz = log_normal_pdf(z, torch.tensor(0.), torch.tensor(0.))
+                logqz_x = log_normal_pdf(z, mean, logvar)
+                print('log p(z)=', logpz.shape, 'log q(z|x)=', logqz_x.shape, 'log p(x|z)=', logpx_z.shape)
+                loss_vae = -torch.mean(logpx_z + logpz - logqz_x)
+                losses.append(loss_vae)
+                out_start = 1
             else:
                 outputs, aux_outputs = model(inputs_var)
-                if not args.bottleneck: #loss main is for the main task label (always the first output)
+                if not args.bottleneck:  # loss main is for the main task label (always the first output)
                     loss_main = 1.0 * criterion(outputs[0], labels_var) + 0.4 * criterion(aux_outputs[0], labels_var)
                     losses.append(loss_main)
                     out_start = 1
-            if attr_criterion is not None and args.attr_loss_weight > 0: #X -> A, cotraining, end2end
+            if attr_criterion is not None and args.attr_loss_weight > 0:  # X -> A, cotraining, end2end
                 for i in range(len(attr_criterion)):
-                    losses.append(args.attr_loss_weight * (1.0 * attr_criterion[i](outputs[i+out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i]) \
-                                                            + 0.4 * attr_criterion[i](aux_outputs[i+out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i])))
-        else: #testing or no aux logits
+                    losses.append(args.attr_loss_weight * (
+                            1.0 * attr_criterion[i](outputs[i + out_start].squeeze().type(torch.cuda.FloatTensor),
+                                                    attr_labels_var[:, i]) \
+                            + 0.4 * attr_criterion[i](
+                        aux_outputs[i + out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i])))
+        else:  # testing or no aux logits
             outputs = model(inputs_var)
             losses = []
             out_start = 0
@@ -132,26 +140,27 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 loss_main = criterion(outputs[0], labels_var)
                 losses.append(loss_main)
                 out_start = 1
-            if attr_criterion is not None and args.attr_loss_weight > 0: #X -> A, cotraining, end2end
+            if attr_criterion is not None and args.attr_loss_weight > 0:  # X -> A, cotraining, end2end
                 for i in range(len(attr_criterion)):
-                    losses.append(args.attr_loss_weight * attr_criterion[i](outputs[i+out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i]))
+                    losses.append(args.attr_loss_weight * attr_criterion[i](
+                        outputs[i + out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i]))
 
-        if args.bottleneck: #attribute accuracy
+        if args.bottleneck:  # attribute accuracy
             sigmoid_outputs = torch.nn.Sigmoid()(torch.cat(outputs, dim=1))
             acc = binary_accuracy(sigmoid_outputs, attr_labels)
             acc_meter.update(acc.data.cpu().numpy(), inputs.size(0))
         else:
-            acc = accuracy(outputs[0], labels, topk=(1,)) #only care about class prediction accuracy
+            acc = accuracy(outputs[0], labels, topk=(1,))  # only care about class prediction accuracy
             acc_meter.update(acc[0], inputs.size(0))
 
-        if attr_criterion is not None: #JM: this is executed
-            if args.bottleneck: #JM: false
+        if attr_criterion is not None:  # JM: this is executed
+            if args.bottleneck:  # JM: false
                 total_loss = sum(losses) / args.n_attributes
-            else: #cotraining, loss by class prediction and loss by attribute prediction have the same weight
+            else:  # cotraining, loss by class prediction and loss by attribute prediction have the same weight
                 total_loss = losses[0] + sum(losses[1:])
                 if args.normalize_loss:
                     total_loss = total_loss / (1 + args.attr_loss_weight * args.n_attributes)
-        else: #finetune
+        else:  # finetune
             total_loss = sum(losses)
         loss_meter.update(total_loss.item(), inputs.size(0))
         if is_training:
@@ -159,6 +168,7 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
             total_loss.backward()
             optimizer.step()
     return loss_meter, acc_meter
+
 
 def train(model, args):
     # Determine imbalance
@@ -170,7 +180,7 @@ def train(model, args):
         else:
             imbalance = find_class_imbalance(train_data_path, False)
 
-    if os.path.exists(args.log_dir): # job restarted by cluster
+    if os.path.exists(args.log_dir):  # job restarted by cluster
         for f in os.listdir(args.log_dir):
             os.remove(os.path.join(args.log_dir, f))
     else:
@@ -182,11 +192,11 @@ def train(model, args):
     logger.flush()
 
     model = model.cuda() if torch.cuda.is_available() else model
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.BCEWithLogitsLoss(reduction='none') if args.use_vae else torch.nn.CrossEntropyLoss()
     if args.use_attr and not args.no_img:  # JM: for joint: True and not False
-        attr_criterion = [] #separate criterion (loss function) for each attribute
+        attr_criterion = []  # separate criterion (loss function) for each attribute
         if args.weighted_loss:
-            assert(imbalance is not None)
+            assert (imbalance is not None)
             for ratio in imbalance:
                 rat = torch.FloatTensor([ratio])
                 attr_criterion.append(torch.nn.BCEWithLogitsLoss(
@@ -198,12 +208,15 @@ def train(model, args):
         attr_criterion = None
 
     if args.optimizer == 'Adam':
-        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=arg.lr, weight_decay=args.weight_decay)
+        optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=arg.lr,
+                                     weight_decay=args.weight_decay)
     elif args.optimizer == 'RMSprop':
-        optimizer = torch.optim.RMSprop(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+        optimizer = torch.optim.RMSprop(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, momentum=0.9,
+                                        weight_decay=args.weight_decay)
     else:
-        optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
-    #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=5, threshold=0.00001, min_lr=0.00001, eps=1e-08)
+        optimizer = torch.optim.SGD(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, momentum=0.9,
+                                    weight_decay=args.weight_decay)
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=5, threshold=0.00001, min_lr=0.00001, eps=1e-08)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=args.scheduler_step, gamma=0.1)
     stop_epoch = int(math.log(MIN_LR / args.lr) / math.log(LR_DECAY_SIZE)) * args.scheduler_step
     print("Stop epoch: ", stop_epoch)
@@ -212,14 +225,17 @@ def train(model, args):
     val_data_path = train_data_path.replace('train.pkl', 'val.pkl')
     logger.write('train data path: %s\n' % train_data_path)
 
-    if args.ckpt: #retraining
-        train_loader = load_data([train_data_path, val_data_path], args.use_attr, args.no_img, args.batch_size, args.uncertain_labels, image_dir=args.image_dir, \
+    if args.ckpt:  # retraining
+        train_loader = load_data([train_data_path, val_data_path], args.use_attr, args.no_img, args.batch_size,
+                                 args.uncertain_labels, image_dir=args.image_dir, \
                                  n_class_attr=args.n_class_attr, resampling=args.resampling)
         val_loader = None
     else:
-        train_loader = load_data([train_data_path], args.use_attr, args.no_img, args.batch_size, args.uncertain_labels, image_dir=args.image_dir, \
+        train_loader = load_data([train_data_path], args.use_attr, args.no_img, args.batch_size, args.uncertain_labels,
+                                 image_dir=args.image_dir, \
                                  n_class_attr=args.n_class_attr, resampling=args.resampling)
-        val_loader = load_data([val_data_path], args.use_attr, args.no_img, args.batch_size, image_dir=args.image_dir, n_class_attr=args.n_class_attr)
+        val_loader = load_data([val_data_path], args.use_attr, args.no_img, args.batch_size, image_dir=args.image_dir,
+                               n_class_attr=args.n_class_attr)
 
     best_val_epoch = -1
     best_val_loss = float('inf')
@@ -229,21 +245,27 @@ def train(model, args):
         train_loss_meter = AverageMeter()
         train_acc_meter = AverageMeter()
         if args.no_img:
-            train_loss_meter, train_acc_meter = run_epoch_simple(model, optimizer, train_loader, train_loss_meter, train_acc_meter, criterion, args, is_training=True)
+            train_loss_meter, train_acc_meter = run_epoch_simple(model, optimizer, train_loader, train_loss_meter,
+                                                                 train_acc_meter, criterion, args, is_training=True)
         else:
-            train_loss_meter, train_acc_meter = run_epoch(model, optimizer, train_loader, train_loss_meter, train_acc_meter, criterion, attr_criterion, args, is_training=True)
- 
-        if not args.ckpt: # evaluate on val set
+            train_loss_meter, train_acc_meter = run_epoch(model, optimizer, train_loader, train_loss_meter,
+                                                          train_acc_meter, criterion, attr_criterion, args,
+                                                          is_training=True)
+
+        if not args.ckpt:  # evaluate on val set
             val_loss_meter = AverageMeter()
             val_acc_meter = AverageMeter()
-        
+
             with torch.no_grad():
                 if args.no_img:
-                    val_loss_meter, val_acc_meter = run_epoch_simple(model, optimizer, val_loader, val_loss_meter, val_acc_meter, criterion, args, is_training=False)
+                    val_loss_meter, val_acc_meter = run_epoch_simple(model, optimizer, val_loader, val_loss_meter,
+                                                                     val_acc_meter, criterion, args, is_training=False)
                 else:
-                    val_loss_meter, val_acc_meter = run_epoch(model, optimizer, val_loader, val_loss_meter, val_acc_meter, criterion, attr_criterion, args, is_training=False)
+                    val_loss_meter, val_acc_meter = run_epoch(model, optimizer, val_loader, val_loss_meter,
+                                                              val_acc_meter, criterion, attr_criterion, args,
+                                                              is_training=False)
 
-        else: #retraining
+        else:  # retraining
             val_loss_meter = train_loss_meter
             val_acc_meter = train_acc_meter
 
@@ -252,21 +274,21 @@ def train(model, args):
             best_val_acc = val_acc_meter.avg
             logger.write('New model best model at epoch %d\n' % epoch)
             torch.save(model, os.path.join(args.log_dir, 'best_model_%d.pth' % args.seed))
-            #if best_val_acc >= 100: #in the case of retraining, stop when the model reaches 100% accuracy on both train + val sets
+            # if best_val_acc >= 100: #in the case of retraining, stop when the model reaches 100% accuracy on both train + val sets
             #    break
 
         train_loss_avg = train_loss_meter.avg
         val_loss_avg = val_loss_meter.avg
-        
+
         logger.write('Epoch [%d]:\tTrain loss: %.4f\tTrain accuracy: %.4f\t'
-                'Val loss: %.4f\tVal acc: %.4f\t'
-                'Best val epoch: %d\n'
-                % (epoch, train_loss_avg, train_acc_meter.avg, val_loss_avg, val_acc_meter.avg, best_val_epoch)) 
+                     'Val loss: %.4f\tVal acc: %.4f\t'
+                     'Best val epoch: %d\n'
+                     % (epoch, train_loss_avg, train_acc_meter.avg, val_loss_avg, val_acc_meter.avg, best_val_epoch))
         logger.flush()
-        
+
         if epoch <= stop_epoch:
-            scheduler.step(epoch) #scheduler step to update lr at the end of epoch     
-        #inspect lr
+            scheduler.step(epoch)  # scheduler step to update lr at the end of epoch
+        # inspect lr
         if epoch % 10 == 0:
             print('Current lr:', scheduler.get_lr())
 
@@ -280,20 +302,24 @@ def train(model, args):
             print("Early stopping because acc hasn't improved for a long time")
             break
 
+
 def train_X_to_C(args):
     model = ModelXtoC(pretrained=args.pretrained, freeze=args.freeze, num_classes=N_CLASSES, use_aux=args.use_aux,
                       n_attributes=args.n_attributes, expand_dim=args.expand_dim, three_class=args.three_class)
     train(model, args)
+
 
 def train_oracle_C_to_y_and_test_on_Chat(args):
     model = ModelOracleCtoY(n_class_attr=args.n_class_attr, n_attributes=args.n_attributes,
                             num_classes=N_CLASSES, expand_dim=args.expand_dim)
     train(model, args)
 
+
 def train_Chat_to_y_and_test_on_Chat(args):
     model = ModelXtoChat_ChatToY(n_class_attr=args.n_class_attr, n_attributes=args.n_attributes,
                                  num_classes=N_CLASSES, expand_dim=args.expand_dim)
     train(model, args)
+
 
 def train_X_to_C_to_y(args):
     model = ModelXtoCtoY(n_class_attr=args.n_class_attr, pretrained=args.pretrained, freeze=args.freeze,
@@ -302,23 +328,29 @@ def train_X_to_C_to_y(args):
     print('training', model.encoder.training)
     train(model, args)
 
+
 def train_X_to_y(args):
     model = ModelXtoY(pretrained=args.pretrained, freeze=args.freeze, num_classes=N_CLASSES, use_aux=args.use_aux)
     train(model, args)
+
 
 def train_X_to_Cy(args):
     model = ModelXtoCY(pretrained=args.pretrained, freeze=args.freeze, num_classes=N_CLASSES, use_aux=args.use_aux,
                        n_attributes=args.n_attributes, three_class=args.three_class, connect_CY=args.connect_CY)
     train(model, args)
 
+
 def train_probe(args):
     probe.run(args)
+
 
 def test_time_intervention(args):
     tti.run(args)
 
+
 def robustness(args):
     gen_cub_synthetic.run(args)
+
 
 def hyperparameter_optimization(args):
     hyperopt.run(args)
@@ -356,15 +388,18 @@ def parse_arguments(experiment):
         parser.add_argument('-weight_decay', type=float, default=5e-5, help='weight decay for optimizer')
         parser.add_argument('-pretrained', '-p', action='store_true',
                             help='whether to load pretrained model & just fine-tune')
-        parser.add_argument('-freeze', action='store_true', help='whether to freeze the bottom part of inception network')
+        parser.add_argument('-freeze', action='store_true',
+                            help='whether to freeze the bottom part of inception network')
         parser.add_argument('-use_aux', action='store_true', help='whether to use aux logits')
         parser.add_argument('-use_attr', action='store_true',
                             help='whether to use attributes (FOR COTRAINING ARCHITECTURE ONLY)')
-        parser.add_argument('-attr_loss_weight', default=1.0, type=float, help='weight for loss by predicting attributes')
+        parser.add_argument('-attr_loss_weight', default=1.0, type=float,
+                            help='weight for loss by predicting attributes')
         parser.add_argument('-no_img', action='store_true',
                             help='if included, only use attributes (and not raw imgs) for class prediction')
-        parser.add_argument('-bottleneck', help='whether to predict attributes before class labels', action='store_true')
-        parser.add_argument('-weighted_loss', default='', # note: may need to reduce lr
+        parser.add_argument('-bottleneck', help='whether to predict attributes before class labels',
+                            action='store_true')
+        parser.add_argument('-weighted_loss', default='',  # note: may need to reduce lr
                             help='Whether to use weighted loss for single attribute or multiple ones')
         parser.add_argument('-uncertain_labels', action='store_true',
                             help='whether to use (normalized) attribute certainties as labels')
@@ -379,7 +414,8 @@ def parse_arguments(experiment):
         parser.add_argument('-resampling', help='Whether to use resampling', action='store_true')
         parser.add_argument('-end2end', action='store_true',
                             help='Whether to train X -> A -> Y end to end. Train cmd is the same as cotraining + this arg')
-        parser.add_argument('-optimizer', default='SGD', help='Type of optimizer to use, options incl SGD, RMSProp, Adam')
+        parser.add_argument('-optimizer', default='SGD',
+                            help='Type of optimizer to use, options incl SGD, RMSProp, Adam')
         parser.add_argument('-ckpt', default='', help='For retraining on both train + val set')
         parser.add_argument('-scheduler_step', type=int, default=1000,
                             help='Number of steps before decaying current learning rate by half')

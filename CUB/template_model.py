@@ -23,7 +23,7 @@ class End2EndModel(torch.nn.Module):
     def __init__(self, model1, model2, use_relu=False, use_sigmoid=False, n_class_attr=2):
         super(End2EndModel, self).__init__()
         self.first_model = model1
-        self.sec_model = model2
+        self.attr_model = model2
         self.use_relu = use_relu
         self.use_sigmoid = use_sigmoid
 
@@ -38,7 +38,7 @@ class End2EndModel(torch.nn.Module):
         stage2_inputs = attr_outputs
         stage2_inputs = torch.cat(stage2_inputs, dim=1)
         print(stage2_inputs.shape)
-        all_out = [self.sec_model(stage2_inputs)]
+        all_out = [self.attr_model(stage2_inputs)]
         all_out.extend(stage1_out)
         return all_out
 
@@ -69,17 +69,20 @@ class VAE(nn.Module):
             attr_outputs = stage1_out
 
         stage2_inputs = attr_outputs
-        stage2_inputs = torch.cat(stage2_inputs, dim=1)
-        print(stage2_inputs.shape)
-        all_out = [self.sec_model(stage2_inputs)]
+        all_out = [self.attr_model(stage2_inputs)]
         all_out.extend(stage1_out)
         return all_out
 
     def forward(self, x):
         if self.encoder.training:
-            outputs, aux_outputs = self.encoder(x)
-            # TODO: only send half the logits (the mu vectors) to the stage2
-            return outputs, self.forward_stage2(outputs), self.forward_stage2(aux_outputs)
+            outputs, aux_outputs = self.encoder(x)  # outputs shape= (batch_size, 2)
+            aux_outputs = torch.cat(aux_outputs, dim=1)
+
+            # only send half the logits (the mu vectors) to the stage2
+            outs = torch.stack(outputs, dim=1)  # TODO: check if there is a faster way of doing this
+            mean = outs[:, :, 0]
+            logvar = outs[:, :, 1]
+            return (mean, logvar), self.forward_stage2(mean), self.forward_stage2(aux_outputs)
         else:
             outputs = self.first_model(x)
             return outputs, self.forward_stage2(outputs)
@@ -178,10 +181,10 @@ class Inception3(nn.Module):
             self.cy_fc = None
 
         if self.n_attributes > 0:
-            if not bottleneck: #multitasking
+            if not bottleneck: #multitasking JM: this is not executed, bottleneck is True
                 self.all_fc.append(FC(2048, num_classes, expand_dim))
+                print(self.all_fc[0])
             for i in range(self.n_attributes):
-                print('adding bottleneck')
                 self.all_fc.append(FC(2048, 2, expand_dim)) # 2: mu and sigma
         else:
             self.all_fc.append(FC(2048, num_classes, expand_dim))
@@ -255,7 +258,7 @@ class Inception3(nn.Module):
         out = []
         for fc in self.all_fc:
             out.append(fc(x))
-        if self.n_attributes > 0 and not self.bottleneck and self.cy_fc is not None:
+        if self.n_attributes > 0 and not self.bottleneck and self.cy_fc is not None: #JM: this is not executed, bottleneck is True
             attr_preds = torch.cat(out[1:], dim=1)
             out[0] += self.cy_fc(attr_preds)
         if self.training and self.aux_logits:
@@ -539,7 +542,8 @@ def inv_calc_transpose_out(out_dim, conv):
 class ConvDecoder(nn.Module):
     def __init__(self):
         super(ConvDecoder, self).__init__()
-        img_width = 299
+        self.img_width = 299
+        self.out_channels = 3
         x_dim = 112  # 112 = number of bird concepts
         self.feat = 8
 
@@ -568,13 +572,13 @@ class ConvDecoder(nn.Module):
         # in_dim = inv_calc_transpose_out(149, self.decode_conv4)
         # print(f'in should be {in_dim}, however is {out_dim}')
         # out_dim = calc_transpose_out(out_dim, self.decode_conv4)
-        self.bn4 = nn.BatchNorm2d(32)
+        self.bn4 = nn.BatchNorm2d(16)
 
-        self.decode_conv5 = nn.ConvTranspose2d(16, 1, kernel_size=5, stride=2, padding=(1,1))
+        self.decode_conv5 = nn.ConvTranspose2d(16, self.out_channels, kernel_size=5, stride=2, padding=(1,1))
         # in_dim = inv_calc_transpose_out(img_width, self.decode_conv5)
         # print(f'Conv5: in should be {in_dim}, however is {out_dim}')
         # out_dim = calc_transpose_out(out_dim, self.decode_conv5)
-        self.bn5 = nn.BatchNorm2d(16)
+        # self.bn5 = nn.BatchNorm2d(16)
         # print(f'Final output should be 299, however is {out_dim}')
 
     def forward(self, x):
@@ -587,7 +591,7 @@ class ConvDecoder(nn.Module):
         Returns decoded output with shape
         (batch_size, y_dim).
         """
-        batch_size, latent_dim, _ = x.size()
+        batch_size, latent_dim = x.size()
 
         x = self.decode_fc(x)
         x = x.view(batch_size, 8, self.feat, self.feat)
@@ -595,8 +599,8 @@ class ConvDecoder(nn.Module):
         x = F.relu(self.bn2(self.decode_conv2(x)))
         x = F.relu(self.bn3(self.decode_conv3(x)))
         x = F.relu(self.bn4(self.decode_conv4(x)))
-        x = self.bn5(self.decode_conv5(x))
-        x = x.view(batch_size, self.y_dim, self.y_dim)
+        x = self.decode_conv5(x)
+        x = x.view(batch_size, self.out_channels, self.img_width, self.img_width)
         return x
 
 
