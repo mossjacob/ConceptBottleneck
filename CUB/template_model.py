@@ -77,11 +77,8 @@ class VAE(nn.Module):
         if self.encoder.training:
             outputs, aux_outputs = self.encoder(x)  # outputs shape= (batch_size, 2)
             aux_outputs = torch.cat(aux_outputs, dim=1)
-
-            # only send half the logits (the mu vectors) to the stage2
-            outs = F.elu(torch.stack(outputs, dim=1))  # TODO: check if there is a faster way of doing this
-            mean = outs[:, :, 0]
-            logvar = outs[:, :, 1]
+            # only send the mu vectors to the stage2
+            mean, logvar = outputs
             return (mean, logvar), self.forward_stage2(mean), self.forward_stage2(aux_outputs)
         else:
             outputs = self.first_model(x)
@@ -137,7 +134,8 @@ def inception_v3(pretrained, freeze, **kwargs):
 
 class Inception3(nn.Module):
 
-    def __init__(self, num_classes, aux_logits=True, transform_input=False, n_attributes=0, bottleneck=False, expand_dim=0, three_class=False, connect_CY=False):
+    def __init__(self, num_classes, aux_logits=True, transform_input=False, n_attributes=0, bottleneck=False,
+                 expand_dim=0, three_class=False, connect_CY=False, vae_encoder=False):
         """
         Args:
         num_classes: number of main task classes
@@ -183,9 +181,13 @@ class Inception3(nn.Module):
         if self.n_attributes > 0:
             if not bottleneck: #multitasking JM: this is not executed, bottleneck is True
                 self.all_fc.append(FC(2048, num_classes, expand_dim))
-                print(self.all_fc[0])
-            for i in range(self.n_attributes):
-                self.all_fc.append(FC(2048, 2, expand_dim)) # 2: mu and sigma
+
+            if vae_encoder:
+                self.all_fc.append(FC(2048, self.n_attributes, expand_dim))
+                self.all_fc.append(FC(2048, self.n_attributes, expand_dim))
+            else:
+                for i in range(self.n_attributes):
+                    self.all_fc.append(FC(2048, 2, expand_dim)) # 2: mu and sigma
         else:
             self.all_fc.append(FC(2048, num_classes, expand_dim))
 
@@ -599,7 +601,7 @@ class ConvDecoder(nn.Module):
         x = F.relu(self.bn2(self.decode_conv2(x)))
         x = F.relu(self.bn3(self.decode_conv3(x)))
         x = F.relu(self.bn4(self.decode_conv4(x)))
-        x = self.decode_conv5(x)
+        x = torch.sigmoid(self.decode_conv5(x))
         x = x.view(batch_size, self.out_channels, self.img_width, self.img_width)
         return x
 

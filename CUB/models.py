@@ -27,7 +27,7 @@ def ModelXtoCtoY(n_class_attr, pretrained, freeze, num_classes, use_aux, n_attri
                  use_relu, use_sigmoid):
     model1 = inception_v3(pretrained=pretrained, freeze=freeze, num_classes=num_classes, aux_logits=use_aux,
                           n_attributes=n_attributes, bottleneck=True, expand_dim=expand_dim,
-                          three_class=(n_class_attr == 3))
+                          three_class=(n_class_attr == 3), vae_encoder=True)
     if n_class_attr == 3:
         attr_model = MLP(input_dim=n_attributes * n_class_attr, num_classes=num_classes, expand_dim=expand_dim)
     else:

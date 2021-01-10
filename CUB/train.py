@@ -107,29 +107,33 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 # print('Mean, logvar shapes: ', mean.shape, logvar.shape)
 
                 # Reparameterise, take single sample
-                eps = torch.normal(torch.zeros(mean.shape), torch.ones(mean.shape))
+                eps = torch.randn_like(logvar)
                 eps = eps.cuda() if torch.cuda.is_available() else eps
                 # print(eps.device, logvar.device, mean.device)
                 z = eps * torch.exp(logvar * .5) + mean
                 decoder_outputs = model.decoder(z)
+                # print(decoder_outputs.size())
+                batch_size, img_width = decoder_outputs.shape[0], decoder_outputs.shape[2]
+                # print(decoder_outputs[0][])
+                # print('real', 0.5+2*inputs_var[0])
                 # print('decoder output shape', decoder_outputs.shape, inputs_var.shape)
-                nll = criterion(decoder_outputs,
-                                0.5 + 2 * inputs_var)  # JM: scaling because inputs_var seems to be [-0.25, 0.25]
-                # print(nll.shape)
-                logpx_z = torch.sum(nll, dim=[1, 2, 3])
-                logpz = log_normal_pdf(z, torch.tensor(0.), torch.tensor(0.))
-                logqz_x = log_normal_pdf(z, mean, logvar)
-                # print('log p(z)=', logpz.shape, 'log q(z|x)=', logqz_x.shape, 'log p(x|z)=', logpx_z.shape)
-                loss_vae = -torch.mean(logpx_z + logpz - logqz_x)
+                logpx_z = criterion(decoder_outputs,
+                                    0.5 + 2 * inputs_var)  # JM: scaling because inputs_var seems to be [-0.25, 0.25]
+
+                KL = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp())
+                KL /= batch_size * img_width * img_width
+                # -.5 * ((sample - mean) ** 2. * torch.exp(-logvar) + logvar + log2pi),
+                # print(logpx_z, KL)
+                loss_vae = logpx_z + KL
                 losses.append(loss_vae)
                 out_start = 1
                 if attr_criterion is not None and args.attr_loss_weight > 0:  # X -> A, cotraining, end2end
                     # print(len(attr_criterion), mean[:,1].shape,type(mean[:,1]), attr_labels_var.shape)
                     for i in range(len(attr_criterion)):
-                        losses.append(
-                            args.attr_loss_weight * (attr_criterion[i](mean[:, i].squeeze().type(torch.cuda.FloatTensor),
-                                                                       attr_labels_var[:, i]))
-                        )
+                        loss = args.attr_loss_weight * (attr_criterion[i](mean[:, i].squeeze().type(torch.cuda.FloatTensor),
+                                                                          attr_labels_var[:, i]))
+                        losses.append(loss)
+                    print(losses[1])
                             #     + 0.4 * attr_criterion[i](
                             # aux_outputs[i + out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i])))
 
@@ -171,9 +175,10 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 total_loss = sum(losses) / args.n_attributes
             else:  # cotraining, loss by class prediction and loss by attribute prediction have the same weight
                 total_loss = losses[0] + sum(losses[1:])
-                print('cotraining, loss', total_loss)
                 if args.normalize_loss:
                     total_loss = total_loss / (1 + args.attr_loss_weight * args.n_attributes)
+                print('cotraining, loss', total_loss)
+
         else:  # finetune
             total_loss = sum(losses)
         loss_meter.update(total_loss.item(), inputs.size(0))
@@ -206,7 +211,7 @@ def train(model, args):
     logger.flush()
 
     model = model.cuda() if torch.cuda.is_available() else model
-    criterion = torch.nn.BCEWithLogitsLoss(reduction='none') if args.use_vae else torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.BCELoss(reduction='mean') if args.use_vae else torch.nn.CrossEntropyLoss()
     if args.use_attr and not args.no_img:  # JM: for joint: True and not False
         attr_criterion = []  # separate criterion (loss function) for each attribute
         if args.weighted_loss:
