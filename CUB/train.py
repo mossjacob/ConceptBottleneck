@@ -274,7 +274,7 @@ def train(model, args):
     #####
     for _, testing_data in enumerate(train_loader):
         break
-    testing_inputs, _ = testing_data
+    testing_inputs, _, _ = testing_data
     testing_inputs = torch.autograd.Variable(testing_inputs)
     testing_inputs = testing_inputs.cuda() if torch.cuda.is_available() else testing_inputs
     #####
@@ -480,6 +480,7 @@ def parse_arguments(experiment):
                             help='Whether to use concepts as auxiliary features (in multitasking) to predict Y')
         parser.add_argument('-use_vae', action='store_true',
                             help='Use VAE loss and a convolutional decoder')
+        parser.add_argument('-gpu', default=0, type=int)
         args = parser.parse_args()
         args.three_class = (args.n_class_attr == 3)
         return (args,)

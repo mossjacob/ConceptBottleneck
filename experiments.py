@@ -1,6 +1,7 @@
 
 import pdb
 import sys
+import torch
 
 
 def run_experiments(dataset, args):
@@ -85,6 +86,8 @@ def parse_arguments():
         from CUB.train import parse_arguments
 
     args = parse_arguments(experiment=experiment)
+    gpu_num = args.gpu
+    torch.cuda.set_device(gpu_num)
     return dataset, args
 
 if __name__ == '__main__':
