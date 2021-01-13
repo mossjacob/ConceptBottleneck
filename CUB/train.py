@@ -5,6 +5,7 @@ import pdb
 import os
 import sys
 import argparse
+from PIL import Image
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -123,7 +124,7 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 KL = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp())
                 KL /= batch_size * img_width * img_width
                 # -.5 * ((sample - mean) ** 2. * torch.exp(-logvar) + logvar + log2pi),
-                # print(logpx_z, KL)
+                print(logpx_z, KL)
                 loss_vae = logpx_z + KL
                 losses.append(loss_vae)
                 out_start = 1
@@ -162,7 +163,18 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                     losses.append(args.attr_loss_weight * attr_criterion[i](
                         outputs[i + out_start].squeeze().type(torch.cuda.FloatTensor), attr_labels_var[:, i]))
 
-        if args.bottleneck:  # attribute accuracy
+        if args.use_vae:
+            encoder_outputs, outputs, aux_outputs = model(inputs_var)
+            mean, logvar = encoder_outputs
+            eps = torch.randn_like(logvar)
+            eps = eps.cuda() if torch.cuda.is_available() else eps
+            z = eps * torch.exp(logvar * .5) + mean
+            decoder_outputs = model.decoder(z)
+            logpx_z = criterion(decoder_outputs,
+                                0.5 + 2 * inputs_var)  # JM: scaling because inputs_var seems to be [-0.25, 0.25]
+            acc = logpx_z
+            acc_meter.update(acc, inputs.size(0))
+        elif args.bottleneck:  # attribute accuracy
             sigmoid_outputs = torch.nn.Sigmoid()(torch.cat(outputs, dim=1))
             acc = binary_accuracy(sigmoid_outputs, attr_labels)
             acc_meter.update(acc.data.cpu().numpy(), inputs.size(0))
@@ -177,7 +189,7 @@ def run_epoch(model, optimizer, loader, loss_meter, acc_meter, criterion, attr_c
                 total_loss = losses[0] + sum(losses[1:])
                 if args.normalize_loss:
                     total_loss = total_loss / (1 + args.attr_loss_weight * args.n_attributes)
-                print('cotraining, loss', total_loss)
+                # print('cotraining, loss', total_loss)
 
         else:  # finetune
             total_loss = sum(losses)
@@ -259,6 +271,13 @@ def train(model, args):
     best_val_epoch = -1
     best_val_loss = float('inf')
     best_val_acc = 0
+    #####
+    for _, testing_data in enumerate(train_loader):
+        break
+    testing_inputs, _ = testing_data
+    testing_inputs = torch.autograd.Variable(testing_inputs)
+    testing_inputs = testing_inputs.cuda() if torch.cuda.is_available() else testing_inputs
+    #####
 
     for epoch in range(0, args.epochs):
         train_loss_meter = AverageMeter()
@@ -304,6 +323,17 @@ def train(model, args):
                      'Best val epoch: %d\n'
                      % (epoch, train_loss_avg, train_acc_meter.avg, val_loss_avg, val_acc_meter.avg, best_val_epoch))
         logger.flush()
+
+        ####
+        encoder_outputs, outputs, aux_outputs = model(testing_inputs)
+        mean, logvar = encoder_outputs
+        eps = torch.randn_like(logvar)
+        eps = eps.cuda() if torch.cuda.is_available() else eps
+        z = eps * torch.exp(logvar * .5) + mean
+        decoder_outputs = model.decoder(z)[0]
+        print('dec out shape', decoder_outputs.shape)
+        Image.fromarray(decoder_outputs).save('testing_image.png')
+        #####
 
         if epoch <= stop_epoch:
             scheduler.step(epoch)  # scheduler step to update lr at the end of epoch
